@@ -348,13 +348,13 @@ def setparam(inputString):
     if inputString[0] == "@":
         if inputString.count('"') == 0:
             inputString = inputString.split()
-            return "madx_"+inputString[0].lower()+"="+inputString[-1]
+            return "madx_"+inputString[1].lower()+"="+inputString[-1]
         else:
             return "pass"
     else:
         return "pass"
 
-def main(sequence=None,Twiss=None):
+def main(sequence=None, Twiss=None):
     """Main function to convert the format.
     """
     global seqCont
