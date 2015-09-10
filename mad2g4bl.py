@@ -34,7 +34,9 @@ import urllib2
 __version__ = "1.01"
 __author__ = "frankliuao"
 __all__ = ['mad2g4bl']
-__history__ = {'07/08/15':"Modified the script to make it work as a module."}
+__history__ = {"07/08/15": "Modified the script to make it work as a module.",
+               "09/10/15": "Changed the conversion of a dipole, "
+                           "added cornerarc; Followed PEP8 more closely"}
 __help__ = """
 
 The MADsequenceFile is the sequence file saved by the "save, sequence"
@@ -55,7 +57,7 @@ Copyright: Ao Liu (frankliuao), 2015
 
 ######
 # Define function g4blwrite:
-def g4blWrite(Cont,kind,currPos,tempPos):
+def g4blWrite(Cont, kind, currPos, tempPos):
     global elementIndex
 
     # Evaluate all the variables:
@@ -175,7 +177,7 @@ def g4blWrite(Cont,kind,currPos,tempPos):
             'fieldInnerRadius=$IR%s'%name + '_%s'%(str(elementIndex)) + ' ' + \
             'fieldOuterRadius=$OR%s'%name + '_%s'%(str(elementIndex)) + ' angle=$Bend%s'%name + '_%s'%(str(elementIndex)) + '\\' + '\n' + \
             'fieldHeight=$IR*2' + ' ironInnerRadius=$IR%s'%name + '_%s'%(str(elementIndex)) + \
-            '-0.2*$IR ' + 'ironOuterRadius=$OR%s'%name+'_%s'%(str(elementIndex)) + '+0.2*$IR' + ' ironHeight=$IR*2.4' + '\\' + '\n' + \
+            '-0.2*$IR ' + 'ironOuterRadius=$OR%s'%name+'_%s'%(str(elementIndex)) + '+0.2*$OR' + ' ironHeight=$IR*2.4' + '\\' + '\n' + \
             'By=$B%s'%name+'_%s'%(str(elementIndex)) + ' ironColor=0,0,1,0.5 ironMaterial=nusaver\n')
         fileG4bl.write('place %s'%name + '_%s'%(str(elementIndex)) + ' z=$Z\n' + \
             'cornerarc z=$Z angle=$Bend%s'%name + '_%s'%(str(elementIndex)) + ' centerRadius=$centerR%s'%name + '_%s\n'%(str(elementIndex)) +\
@@ -354,7 +356,7 @@ def setparam(inputString):
     else:
         return "pass"
 
-def main(sequence=None, Twiss=None):
+def main(sequence=None, twiss=None):
     """Main function to convert the format.
     """
     global seqCont
