@@ -21,14 +21,15 @@ Copyright: Ao Liu (frankliuao), 2015
 """
 
 from __future__ import division
+import ast
 import math
+import operator
 import os
 import sys
 import time
 import string
 import re
 import copy
-import urllib2
 
 
 __version__ = "1.01"
@@ -55,17 +56,139 @@ Copyright: Ao Liu (frankliuao), 2015
 """
 
 
+# Accepted name -> (G4beamline name, PDG Monte Carlo id, charge).
+# Charge is in units of e. Neutrons and photons are 0.
+# The first field is what the .g4bl file writes. Aliases map to that spelling:
+# antiproton -> anti_proton, K+ -> kaon+, K- -> kaon-.
+PDG_PARTICLES = {
+    'proton': ('proton', 2212, 1),
+    'antiproton': ('anti_proton', -2212, -1),
+    'anti_proton': ('anti_proton', -2212, -1),
+    'neutron': ('neutron', 2112, 0),
+    'pi+': ('pi+', 211, 1),
+    'pi-': ('pi-', -211, -1),
+    'K+': ('kaon+', 321, 1),
+    'K-': ('kaon-', -321, -1),
+    'kaon+': ('kaon+', 321, 1),
+    'kaon-': ('kaon-', -321, -1),
+    'mu+': ('mu+', -13, 1),
+    'mu-': ('mu-', 13, -1),
+    'e+': ('e+', -11, 1),
+    'e-': ('e-', 11, -1),
+    'gamma': ('gamma', 22, 0),
+}
+
+try:
+    _REAL_TYPES = (int, long, float)
+except NameError:
+    _REAL_TYPES = (int, float)
+
+_ASSIGN_NAME = re.compile(r'^[A-Za-z_][A-Za-z0-9_]*$')
+
+
+def _numeric_literal(node):
+    """Return the number held by a numeric AST node, or None."""
+    value = None
+    if node.__class__.__name__ == 'Num':
+        value = node.n
+    elif node.__class__.__name__ == 'Constant':
+        value = node.value
+    else:
+        return None
+    if isinstance(value, bool) or not isinstance(value, _REAL_TYPES):
+        return None
+    return value
+
+
+def safe_madx_number(expr, names):
+    """Evaluate one numeric MAD-X expression.
+
+    Allowed: numeric literals, names already present in ``names``,
+    parentheses, and the operators + - * / **. Anything else raises
+    ValueError. Names are not looked up in Python builtins or globals.
+    """
+    source = expr.strip()
+    if source == '':
+        raise ValueError('empty expression')
+    try:
+        tree = ast.parse(source, mode='eval')
+    except SyntaxError:
+        raise ValueError(
+            'unsupported expression %r; only numbers, names, parentheses, '
+            'and + - * / ** are allowed' % expr)
+
+    def walk(node):
+        literal = _numeric_literal(node)
+        if literal is not None:
+            return literal
+        if isinstance(node, ast.UnaryOp):
+            operand = walk(node.operand)
+            if isinstance(node.op, ast.UAdd):
+                return +operand
+            if isinstance(node.op, ast.USub):
+                return -operand
+        elif isinstance(node, ast.BinOp):
+            left = walk(node.left)
+            right = walk(node.right)
+            if isinstance(node.op, ast.Add):
+                return left + right
+            if isinstance(node.op, ast.Sub):
+                return left - right
+            if isinstance(node.op, ast.Mult):
+                return left * right
+            if isinstance(node.op, ast.Div):
+                # True division on Python 2 and Python 3.
+                return operator.truediv(left, right)
+            if isinstance(node.op, ast.Pow):
+                return left ** right
+        elif isinstance(node, ast.Name):
+            if node.id in names:
+                return names[node.id]
+            raise ValueError('the variable %s is not defined' % node.id)
+        raise ValueError(
+            'unsupported expression %r; only numbers, names, parentheses, '
+            'and + - * / ** are allowed' % expr)
+
+    try:
+        value = walk(tree.body)
+    except ZeroDivisionError:
+        raise ValueError('division by zero in expression %r' % expr)
+    if isinstance(value, bool) or not isinstance(value, _REAL_TYPES):
+        raise ValueError(
+            'unsupported expression %r; only numbers, names, parentheses, '
+            'and + - * / ** are allowed' % expr)
+    return value
+
+
+def load_madx_names(lines):
+    """Read simple ``name = expr`` / ``name := expr`` lines into a dict.
+
+    Element definitions contain a comma and are ignored. Expressions are
+    evaluated with safe_madx_number, so file text is never executed.
+    """
+    names = {}
+    for line in lines:
+        compact = re.sub('[; ]', '', line)
+        parts = re.split(':=|=', compact)
+        if len(parts) == 2 and len(re.split(',', compact)) == 1:
+            lhs, rhs = parts[0], parts[1]
+            if not _ASSIGN_NAME.match(lhs):
+                raise ValueError('invalid assignment name %r' % lhs)
+            names[lhs] = safe_madx_number(rhs, names)
+    return names
+
+
 ######
 # Define function g4blwrite:
 def g4blWrite(Cont, kind, currPos, tempPos):
     global elementIndex
 
-    # Evaluate all the variables:
-    for mm in range(0,len(SeqCont),1):
-        SeqContCp = re.sub('[; ]','',SeqCont[mm])
-        SeqContCp = re.split(':=|=',SeqContCp)
-        if len(SeqContCp)==2 and len(re.split('\,',re.sub('[; ]','',SeqCont[mm])))==1:
-            exec string.join(SeqContCp,'=')
+    # Numeric assignments from the sequence file. Not executed.
+    try:
+        madx_names = load_madx_names(SeqCont)
+    except ValueError as mad_err:
+        print 'Error: %s' % mad_err
+        sys.exit(1)
     if kind == 'b':
         ContPrime = Cont
         Cont = re.sub('[ {};]','',Cont)
@@ -101,10 +224,10 @@ def g4blWrite(Cont, kind, currPos, tempPos):
                     apertSize = param2
                 else:
                     try:
-                        param2 = eval(param2)
-                    except:
-                        print 'Error: the variable %s'%param2+' is not defined!'
-                        sys.exit()
+                        param2 = safe_madx_number(param2, madx_names)
+                    except ValueError as mad_err:
+                        print 'Error: %s' % mad_err
+                        sys.exit(1)
                     
             # Set the direct parameters:
             if param == 'l':
@@ -220,10 +343,10 @@ def g4blWrite(Cont, kind, currPos, tempPos):
                     apertSize = param2
                 else:
                     try:
-                        param2 = eval(param2)
-                    except:
-                        print 'Error: the variable %s'%param2+' is not defined!'
-                        sys.exit()
+                        param2 = safe_madx_number(param2, madx_names)
+                    except ValueError as mad_err:
+                        print 'Error: %s' % mad_err
+                        sys.exit(1)
                         
             # Set the direct parameters:
             if param == 'l':
@@ -303,14 +426,6 @@ def g4blWrite(Cont, kind, currPos, tempPos):
         elementIndex += 1
         return 0.05
 
-def getPDGdata():
-    """Get the PDG data from the web server"""
-    pdgDataHandle = urllib2.urlopen('http://frankliuao.com/downloads/Codes/pdg_py.dict')
-    pdgDataCont = pdgDataHandle.read()
-    pdgDataHandle.close()
-    exec pdgDataCont
-    return pdgData, pdgMap
-
 def Twissdict(TwissCont):
     """Extract the contents in the Twiss file as a dictionary.
 
@@ -340,21 +455,34 @@ def Twissdict(TwissCont):
     return TwissDict
 
 def setparam(inputString):
-    """Extract the beam parameter definitions in the Twiss file.
+    """Extract one '@' header from a MAD-X TWISS file.
 
     In the Twiss file of MAD-X, some beam parameters are defined, e.g.
     @ MASS             %le              0.1397
-    This code process these parameter definition lines and extract the
-    useful information.
+    Returns (name, value), or None if the line is not an '@' header.
+    The name is madx_ plus the lower-cased header name. A value that
+    float() accepts is stored as a float; every other value is a string.
+    The line is never executed.
     """
-    if inputString[0] == "@":
-        if inputString.count('"') == 0:
-            inputString = inputString.split()
-            return "madx_"+inputString[1].lower()+"="+inputString[-1]
+    if not inputString or inputString[0] != "@":
+        return None
+    parts = inputString.split()
+    if len(parts) < 3:
+        return None
+    name = "madx_" + parts[1].lower()
+    if '"' in inputString:
+        start = inputString.find('"')
+        end = inputString.rfind('"')
+        if end > start:
+            raw = inputString[start + 1:end]
         else:
-            return "pass"
+            raw = parts[-1].strip('"')
     else:
-        return "pass"
+        raw = parts[-1]
+    try:
+        return name, float(raw)
+    except (TypeError, ValueError):
+        return name, raw
 
 def main(sequence=None, twiss=None):
     """Main function to convert the format.
@@ -378,12 +506,20 @@ def main(sequence=None, twiss=None):
     TwissCont = TwissHandle.readlines()
     TwissHandle.close()
 
-    # Find the key parameters in the Twiss file and set them as variables.
-    for ii in [setparam(jj) for jj in TwissCont]:
-        exec(ii)
+    # '@' headers from the TWISS file, stored in a dict and not executed.
+    twiss_header = {}
+    for jj in TwissCont:
+        parsed = setparam(jj)
+        if parsed is None:
+            continue
+        header_name, header_value = parsed
+        twiss_header[header_name] = header_value
     # Convert the units.
-    mass, energy, p = madx_mass*1000, madx_energy*1000, madx_pc*1000
-    ex, ey = madx_ex*1000, madx_ey*1000
+    mass = twiss_header['madx_mass'] * 1000
+    energy = twiss_header['madx_energy'] * 1000
+    p = twiss_header['madx_pc'] * 1000
+    ex = twiss_header['madx_ex'] * 1000
+    ey = twiss_header['madx_ey'] * 1000
     #
     kE = (energy-mass)
     rigidity = p*3.33564/1000
@@ -417,20 +553,15 @@ def main(sequence=None, twiss=None):
     thetaX, thetaY = px_0, py_0
 
 
-    # User input: particle name; From the name get the particle charge.
-    pdgData, pdgMap = getPDGdata()
+    # User input: particle name; From the name get the PDG id and charge.
+    global particleSign
     while True:
         particle = raw_input('Please input your particle. See G4bl manual for supported names. e.g. pi+, mu+, e+, ...\n')
         try:
-            PDGid = pdgMap[particle]
+            particle, PDGid, particleSign = PDG_PARTICLES[particle]
             break
         except KeyError:
             continue
-
-    particle = ''
-    PDGid = {'e+':1, 'e-':-1, 'anti_nu_e':1, 'anti_nu_mu':1, 'anti_nu_tau':1, 'gamma':1, 'gluon':1, 'kaon+':1,'kaon-':-1,
-                 'kaon0':1, 'mu+':1, 'mu-':-1, 'neutron':1, 'nu_e':1, 'nu_mu':1, 'nu_tau':1, 'pi+':1, 'pi-':-1, 'pi0':1,
-                 'proton':1, 'rho+':1, 'rho-':-1, 'rho0':1, 'tau+':1, 'tau-':-1, 'anti_proton':-1}
 
 
     # Set the default aperture radius in mm:
@@ -472,87 +603,85 @@ def main(sequence=None, twiss=None):
     dipolelabel = 0                        # To conserve the length of beamline;
     print "Running the conversion, please wait..."
 
-    # Ready to write the .g4bl file.
+    # Ready to write the .g4bl file. 'w' truncates an existing file.
     global fileG4bl
-    if os.path.exists(seqName+'.g4bl'):
-        os.system('''rm %s'''%(seqName+'.g4bl'))
-    fileG4bl = open(seqName+'.g4bl','w')
+    with open(seqName + '.g4bl', 'w') as fileG4bl:
 
-    # Write some pre-definition in it first:
-    fileG4bl.write('# G4Beamline version of %s and %s, the rigidity is $rigid T.m.\n\n'%(arg1,arg2)+'''# Ao Liu (ID:frankliuao)'s mad2g4bl.csh; Version 1.0.\n\n''')
-    fileG4bl.write('# Use the low energy physics list \n'+'physics QGSP_BERT list=1 disable=Decay\n \n'+'param IR=%s maxStep=1 eventTimeLimit=400\n\n'%(str(apert)))
-    fileG4bl.write('# Notice!!!!!!!\n'+'# Define your beam here, on line 12.\n')
-    # Defining the beam if the user requested so:
-    if beamFlag:
-        fileG4bl.write('beam gaussian particle=%s'%particle + ' nEvents=5000 meanP=%s '%str(p)+'\\\n')
-        fileG4bl.write('beamX=%s'%str(initX) + ' beamY=%s'%str(initY)+' beamZ=%s'%str(initZ)+' sigmaP=-%s'%str(sigE/beta/beta*p)+' sigmaX=%s'%str(sigX)+' sigmaY=%s'%str(sigY)+' sigmaZ=0 '+'\\'+'\n')
-        fileG4bl.write('meanXp=%s'%str(thetaX)+' meanYp=%s'%str(thetaY)+' meanT=0 sigmaXp=%s'%str(sigXp)+' sigmaYp=%s'%str(sigYp)+' sigmaT=0'+'\n\n\n')
-    else:
-        fileG4bl.write('\n\n\n')
-    #
-    fileG4bl.write('output %s'%seqName+'.out \n\n')
-    fileG4bl.write('# Define a reference particle:\n'+'reference particle=%s'%particle + ' referenceMomentum=%s'%(str(p)) + ' beamZ=0\n\n')
-    fileG4bl.write('# Change color for particles:\n'+'particlecolor mu+=1,0,0 pi+=0,1,1 e+=0,1,0\n\n')
-    fileG4bl.write('trackcuts keep=%s,nu_mu,anti_nu_mu,nu_e,anti_nu_e\n\n'%particle)
-    fileG4bl.write('# Redirect the loss information to a separate file\n'+'beamlossntuple losscheck format=ascii file=%s\n\n'%(arg1Prime))
-    fileG4bl.write('# Define a new material for killing particles hitting it except for neutrinos.\n'+'material nusaver Fe,1.0 density=7.874 keep=nu_mu,nu_e,anti_nu_mu,anti_nu_e\n\n')
-    fileG4bl.write('param histoFile=%s \n\n'%(seqName))
-    fileG4bl.write('# Put a particle filter here to stop particles circulating more than n turns as User defined;\n')
-    fileG4bl.write('particlefilter ringfilter radius=$IR length=0.01 kill=mu+,e+,pi+ material=Vacuum color=0,0,1 nWait=2 referenceWait=2 steppingVerbose=1 \n')
-    fileG4bl.write('place ringfilter z=0.02\nparam Z=0.05\n\n')
+        # Write some pre-definition in it first:
+        fileG4bl.write('# G4Beamline version of %s and %s, the rigidity is $rigid T.m.\n\n'%(arg1,arg2)+'''# Ao Liu (ID:frankliuao)'s mad2g4bl.csh; Version 1.0.\n\n''')
+        fileG4bl.write('# Use the low energy physics list \n'+'physics QGSP_BERT list=1 disable=Decay\n \n'+'param IR=%s maxStep=1 eventTimeLimit=400\n\n'%(str(apert)))
+        fileG4bl.write('# Notice!!!!!!!\n'+'# Define your beam here, on line 12.\n')
+        # Defining the beam if the user requested so:
+        if beamFlag:
+            fileG4bl.write('beam gaussian particle=%s'%particle + ' nEvents=5000 meanP=%s '%str(p)+'\\\n')
+            fileG4bl.write('beamX=%s'%str(initX) + ' beamY=%s'%str(initY)+' beamZ=%s'%str(initZ)+' sigmaP=-%s'%str(sigE/beta/beta*p)+' sigmaX=%s'%str(sigX)+' sigmaY=%s'%str(sigY)+' sigmaZ=0 '+'\\'+'\n')
+            fileG4bl.write('meanXp=%s'%str(thetaX)+' meanYp=%s'%str(thetaY)+' meanT=0 sigmaXp=%s'%str(sigXp)+' sigmaYp=%s'%str(sigYp)+' sigmaT=0'+'\n\n\n')
+        else:
+            fileG4bl.write('\n\n\n')
+        #
+        fileG4bl.write('output %s'%seqName+'.out \n\n')
+        fileG4bl.write('# Define a reference particle:\n'+'reference particle=%s'%particle + ' referenceMomentum=%s'%(str(p)) + ' beamZ=0\n\n')
+        fileG4bl.write('# Change color for particles:\n'+'particlecolor mu+=1,0,0 pi+=0,1,1 e+=0,1,0\n\n')
+        fileG4bl.write('trackcuts keep=%s,nu_mu,anti_nu_mu,nu_e,anti_nu_e\n\n'%particle)
+        fileG4bl.write('# Redirect the loss information to a separate file\n'+'beamlossntuple losscheck format=ascii file=%s\n\n'%(arg1Prime))
+        fileG4bl.write('# Define a new material for killing particles hitting it except for neutrinos.\n'+'material nusaver Fe,1.0 density=7.874 keep=nu_mu,nu_e,anti_nu_mu,anti_nu_e\n\n')
+        fileG4bl.write('param histoFile=%s \n\n'%(seqName))
+        fileG4bl.write('# Put a particle filter here to stop particles circulating more than n turns as User defined;\n')
+        fileG4bl.write('particlefilter ringfilter radius=$IR length=0.01 kill=mu+,e+,pi+ material=Vacuum color=0,0,1 nWait=2 referenceWait=2 steppingVerbose=1 \n')
+        fileG4bl.write('place ringfilter z=0.02\nparam Z=0.05\n\n')
 
-    # Record the element index:
-    global elementIndex
-    elementIndex = 1
+        # Record the element index:
+        global elementIndex
+        elementIndex = 1
 
-    ########
-    # Deal with the sequence file:
-    # Find where the sequence definition lines start and end:
-    for kk in range(0,len(SeqCont),1):
-        lineTemp = string.split(SeqCont[kk])
-        # Find where it starts:
-        if lineTemp[1]=='sequence,':
-            # Set the current longitudinal position to 0:
-            currPos = 0
-            ll = kk+1
-            # From now until the definition ends:
-            while SeqCont[ll]!='endsequence;\n':
-                # Get the beamline element name and its longitudinal position:
-                SeqTemp = SeqCont[ll].replace(';','').replace('\n','')
-                SeqTempSplit = string.split(SeqTemp,', at = ')
-                SeqTempName = SeqTempSplit[0]
-                SeqTempPos = float(SeqTempSplit[1])*1000
-                # Then look for this element name in the sequence file:
-                for mm in range(0,len(SeqCont),1):
-                    NameFind = string.split(SeqCont[mm].replace(';','').replace('\n',''),': ')
-                    if NameFind[0]==SeqTempName:
-                        # NameFound is the definition line of this element:
-                        NameFound = string.split(SeqCont[mm].replace(';','').replace('\n',''),',')
-                        NameType = string.split(NameFound[0],': ')
-                        NameType = NameType[1].replace(' ','')
-                        if NameType == 'quadrupole':
-                            halfLength = g4blWrite(SeqCont[mm],'q',currPos,SeqTempPos)
-                        elif NameType == 'sbend':
-                            halfLength = g4blWrite(SeqCont[mm],'b',currPos,SeqTempPos)
-                        elif NameType == 'marker':
-                            halfLength = g4blWrite(SeqCont[mm],'m',currPos,SeqTempPos)
-                        else:
-                            print '*** Error: the element type %s'%NameType+' is not supported. Contact the author please***'
-                            print '*** www.frankliuao.com ***'
-                        # Move the current position to the tail of this element:
-                        currPos = SeqTempPos + halfLength
-                        # Break the loop of NameFind:
-                        break
+        ########
+        # Deal with the sequence file:
+        # Find where the sequence definition lines start and end:
+        for kk in range(0,len(SeqCont),1):
+            lineTemp = string.split(SeqCont[kk])
+            # Find where it starts:
+            if lineTemp[1]=='sequence,':
+                # Set the current longitudinal position to 0:
+                currPos = 0
+                ll = kk+1
+                # From now until the definition ends:
+                while SeqCont[ll]!='endsequence;\n':
+                    # Get the beamline element name and its longitudinal position:
+                    SeqTemp = SeqCont[ll].replace(';','').replace('\n','')
+                    SeqTempSplit = string.split(SeqTemp,', at = ')
+                    SeqTempName = SeqTempSplit[0]
+                    SeqTempPos = float(SeqTempSplit[1])*1000
+                    # Then look for this element name in the sequence file:
+                    for mm in range(0,len(SeqCont),1):
+                        NameFind = string.split(SeqCont[mm].replace(';','').replace('\n',''),': ')
+                        if NameFind[0]==SeqTempName:
+                            # NameFound is the definition line of this element:
+                            NameFound = string.split(SeqCont[mm].replace(';','').replace('\n',''),',')
+                            NameType = string.split(NameFound[0],': ')
+                            NameType = NameType[1].replace(' ','')
+                            if NameType == 'quadrupole':
+                                halfLength = g4blWrite(SeqCont[mm],'q',currPos,SeqTempPos)
+                            elif NameType == 'sbend':
+                                halfLength = g4blWrite(SeqCont[mm],'b',currPos,SeqTempPos)
+                            elif NameType == 'marker':
+                                halfLength = g4blWrite(SeqCont[mm],'m',currPos,SeqTempPos)
+                            else:
+                                print '*** Error: the element type %s'%NameType+' is not supported. Contact the author please***'
+                                print '*** www.frankliuao.com ***'
+                            # Move the current position to the tail of this element:
+                            currPos = SeqTempPos + halfLength
+                            # Break the loop of NameFind:
+                            break
 
-                # Go to the next line (while SeqCont[ll]!='endsequence;':)
-                ll += 1
-            # Once gone through the sequence definitions, the loop can be broken:
-            break
-    ####
-    # Finally, we need to add a virtualdetector whatsoever to the end of this beamline:
-    fileG4bl.write('\n\n'+'# Beam tranfer monitoring virtualdetector'+'\n')
-    fileG4bl.write('virtualdetector detEnd length=0.01 radius=$IR material=Vacuum format=ascii file=detEnd referenceParticle=1\nplace detEnd z=$Z+0.01 front=1')
-    print '\n'+'Conversion complete!'
+                    # Go to the next line (while SeqCont[ll]!='endsequence;':)
+                    ll += 1
+                # Once gone through the sequence definitions, the loop can be broken:
+                break
+        ####
+        # Finally, we need to add a virtualdetector whatsoever to the end of this beamline:
+        fileG4bl.write('\n\n'+'# Beam tranfer monitoring virtualdetector'+'\n')
+        fileG4bl.write('virtualdetector detEnd length=0.01 radius=$IR material=Vacuum format=ascii file=detEnd referenceParticle=1\nplace detEnd z=$Z+0.01 front=1')
+        print '\n'+'Conversion complete!'
 
 def mad2g4bl(sequence=None, Twiss=None):
     """Just an alias of the main function.
