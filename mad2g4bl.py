@@ -56,25 +56,26 @@ Copyright: Ao Liu (frankliuao), 2015
 """
 
 
-# Species this converter accepts: name -> (PDG Monte Carlo id, charge).
+# Accepted name -> (G4beamline name, PDG Monte Carlo id, charge).
 # Charge is in units of e. Neutrons and photons are 0.
-# anti_proton / kaon+/- are the G4beamline spellings of antiproton / K+/-.
+# The first field is what the .g4bl file writes. Aliases map to that spelling:
+# antiproton -> anti_proton, K+ -> kaon+, K- -> kaon-.
 PDG_PARTICLES = {
-    'proton': (2212, 1),
-    'antiproton': (-2212, -1),
-    'anti_proton': (-2212, -1),
-    'neutron': (2112, 0),
-    'pi+': (211, 1),
-    'pi-': (-211, -1),
-    'K+': (321, 1),
-    'K-': (-321, -1),
-    'kaon+': (321, 1),
-    'kaon-': (-321, -1),
-    'mu+': (-13, 1),
-    'mu-': (13, -1),
-    'e+': (-11, 1),
-    'e-': (11, -1),
-    'gamma': (22, 0),
+    'proton': ('proton', 2212, 1),
+    'antiproton': ('anti_proton', -2212, -1),
+    'anti_proton': ('anti_proton', -2212, -1),
+    'neutron': ('neutron', 2112, 0),
+    'pi+': ('pi+', 211, 1),
+    'pi-': ('pi-', -211, -1),
+    'K+': ('kaon+', 321, 1),
+    'K-': ('kaon-', -321, -1),
+    'kaon+': ('kaon+', 321, 1),
+    'kaon-': ('kaon-', -321, -1),
+    'mu+': ('mu+', -13, 1),
+    'mu-': ('mu-', 13, -1),
+    'e+': ('e+', -11, 1),
+    'e-': ('e-', 11, -1),
+    'gamma': ('gamma', 22, 0),
 }
 
 try:
@@ -557,7 +558,7 @@ def main(sequence=None, twiss=None):
     while True:
         particle = raw_input('Please input your particle. See G4bl manual for supported names. e.g. pi+, mu+, e+, ...\n')
         try:
-            PDGid, particleSign = PDG_PARTICLES[particle]
+            particle, PDGid, particleSign = PDG_PARTICLES[particle]
             break
         except KeyError:
             continue
